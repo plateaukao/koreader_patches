@@ -23,6 +23,26 @@ Adds a **"Lighten for color e-ink"** slider to the Cover Image plugin's *Size, b
 | 50 % | Medium (recommended for most color e-ink screens) |
 | 70 % | Very light |
 
+### 3-coverimage-eink-optimize.lua
+
+Adds an **"Optimize for color e-ink"** slider to the Cover Image plugin's *Size, background and format* menu. Applies a combined image processing pipeline tuned for color e-ink panels (Kaleido, Gallery) without front light:
+
+- **Gamma lift** – brightens shadows and midtones so dark cover art stays visible
+- **Saturation boost** – compensates for the washed-out colors typical of color e-ink
+- **S-curve contrast** – adds punch without blowing out highlights
+- **Floyd-Steinberg dithering** – produces smoother gradients on limited color palettes (16 levels/channel)
+
+All four effects are controlled by a single percentage slider:
+
+| Setting | Effect |
+|---------|--------|
+| 0 % | Off (original image) |
+| 30 % | Subtle optimization |
+| 50 % | Recommended for most color e-ink screens |
+| 80 % | Aggressive (very saturated, high contrast) |
+
+Works independently of, or in addition to, the lighten patch (`2-coverimage-lighten.lua`).
+
 ## Writing Your Own Patches
 
 KOReader's user patch system loads `.lua` files from the `patches/` directory at startup. Patches use `userpatch.registerPatchPluginFunc(plugin_name, callback)` to monkey-patch existing plugin methods. See the existing patches for the pattern.
