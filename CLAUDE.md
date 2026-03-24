@@ -8,7 +8,7 @@ A collection of KOReader user patches — standalone Lua scripts that users drop
 
 ## Conventions
 
-- **File naming**: Patches are numbered with a prefix (e.g., `2-coverimage-lighten.lua`). The number controls load order within KOReader's patch system.
+- **File naming**: Patches are prefixed with a priority digit (e.g., `2-coverimage-lighten.lua`). The first digit is a **priority level** that determines when the patch runs: `0` = early once (after update), `1` = early (always), `2` = late (after UIManager, for UI/plugin patches), `8` = before exit, `9` = on exit. Files within the same priority are sorted by natural sort. Only filenames matching `^[priority]\d*-` are loaded.
 - **Language**: Lua, targeting KOReader's LuaJIT runtime.
 - **Patch mechanism**: Patches use `userpatch.registerPatchPluginFunc(plugin_name, callback)` to monkey-patch existing KOReader plugin methods at runtime. The pattern is to capture the original method, replace it with a wrapper that calls the original, then extends behavior.
 - **Settings**: Persistent settings use `G_reader_settings:readSetting(key, default)` / `G_reader_settings:saveSetting(key, value)`.

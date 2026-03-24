@@ -23,7 +23,7 @@ Adds a **"Lighten for color e-ink"** slider to the Cover Image plugin's *Size, b
 | 50 % | Medium (recommended for most color e-ink screens) |
 | 70 % | Very light |
 
-### 3-coverimage-eink-optimize.lua
+### 2-coverimage-eink-optimize.lua
 
 Adds an **"Optimize for color e-ink"** slider to the Cover Image plugin's *Size, background and format* menu. Applies a combined image processing pipeline tuned for color e-ink panels (Kaleido, Gallery) without front light:
 
