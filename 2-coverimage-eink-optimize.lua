@@ -4,8 +4,11 @@
     Place this file in the koreader/patches/ directory on your device.
     (Create the patches/ folder if it does not exist.)
 
-    Adds an "Optimize for color e-ink" percentage slider inside the
-    Cover Image > Size, background and format menu.
+    Supports two screensaver mechanisms:
+      - Kobo, Kindle, Cervantes, etc.: patches the built-in Sleep Screen
+        (Settings > Sleep screen > Wallpaper > Optimize for color e-ink)
+      - Android, reMarkable, PocketBook: patches the Cover Image plugin
+        (Cover Image > Size, background and format > Optimize for color e-ink)
 
     Applies a combined processing pipeline tuned for color e-ink panels
     (Kaleido, Gallery) without front light:
@@ -23,8 +26,9 @@
     Works independently of (or in addition to) the lighten patch.
 --]]
 
-local userpatch = require("userpatch")
+local userpatch  = require("userpatch")
 local Blitbuffer = require("ffi/blitbuffer")
+local Device     = require("device")
 local logger     = require("logger")
 local ffi        = require("ffi")
 local math_floor = math.floor
@@ -65,6 +69,8 @@ local function applyToneAndSaturation(raw, stride, w, h, bpp, lut, sat)
         local row = raw + y * stride
         for x = 0, w - 1 do
             local p = row + x * bpp
+            -- Skip fully transparent pixels (RGB32 alpha channel)
+            if bpp == 4 and p[3] == 0 then goto continue end
             local r, g, b = lut[p[0]], lut[p[1]], lut[p[2]]
             if sat ~= 1 then
                 local L = 0.299 * r + 0.587 * g + 0.114 * b
@@ -73,6 +79,7 @@ local function applyToneAndSaturation(raw, stride, w, h, bpp, lut, sat)
                 b = clamp8(L + sat * (b - L))
             end
             p[0], p[1], p[2] = r, g, b
+            ::continue::
         end
     end
 end
@@ -99,6 +106,9 @@ local function applyDither(raw, stride, w, h, bpp, levels)
         for x = 0, w - 1 do
             local p  = row + x * bpp
             local xi = x + 1            -- offset index into error buffers
+
+            -- Skip fully transparent pixels; don't spread error from them
+            if bpp == 4 and p[3] == 0 then goto dither_continue end
 
             -- Original value + accumulated error
             local r = p[0] + ec_r[xi]
@@ -131,6 +141,8 @@ local function applyDither(raw, stride, w, h, bpp, levels)
             en_r[xi + 1] = en_r[xi + 1] + er * 0.0625
             en_g[xi + 1] = en_g[xi + 1] + eg * 0.0625
             en_b[xi + 1] = en_b[xi + 1] + eb * 0.0625
+
+            ::dither_continue::
         end
         -- Swap current / next error rows
         ec_r, en_r = en_r, ec_r
@@ -186,7 +198,7 @@ local function optimizeForEink(bb, strength)
 end
 
 -- ---------------------------------------------------------------------------
--- Patch the coverimage plugin
+-- Patch the coverimage plugin (Android, reMarkable, PocketBook, Emulator)
 -- ---------------------------------------------------------------------------
 userpatch.registerPatchPluginFunc("coverimage", function(plugin)
     if plugin._eink_optimize_patched then return end
@@ -270,3 +282,129 @@ userpatch.registerPatchPluginFunc("coverimage", function(plugin)
 
     logger.info("coverimage eink-optimize patch applied")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Patch the Screensaver module (Kobo, Kindle, Cervantes, etc.)
+-- ---------------------------------------------------------------------------
+if Device:supportsScreensaver() then
+    local Screensaver = require("ui/screensaver")
+
+    -- Recursively find the ImageWidget inside the screensaver widget tree
+    -- and enable alpha blending so transparent PNGs composite correctly.
+    local function enableAlphaOnImageWidget(widget)
+        if widget == nil then return false end
+        if widget.alpha ~= nil and (widget.image or widget.file or widget._bb) then
+            widget.alpha = true
+            return true
+        end
+        for i = 1, #widget do
+            if enableAlphaOnImageWidget(widget[i]) then return true end
+        end
+        return widget.widget and enableAlphaOnImageWidget(widget.widget) or false
+    end
+
+    -- Wrap show() to process cover/random images before they are displayed.
+    local orig_show = Screensaver.show
+    Screensaver.show = function(self)
+        local strength = G_reader_settings:readSetting("screensaver_eink_optimize", 0)
+        local needs_alpha = false
+        if strength > 0 and (self.screensaver_type == "cover"
+                          or self.screensaver_type == "random_image") then
+            if self.image then
+                -- Cover image: already a blitbuffer from bookinfo:getCoverImage()
+                self.image = optimizeForEink(self.image, strength)
+            elseif self.image_file then
+                -- Random/custom image: load from file, process, store as blitbuffer
+                local RenderImage = require("ui/renderimage")
+                local util = require("util")
+                local bb
+                if util.getFileNameSuffix(self.image_file) == "svg" then
+                    bb = RenderImage:renderSVGImageFile(self.image_file, nil, nil, 1)
+                else
+                    bb = RenderImage:renderImageFile(self.image_file, false, nil, nil)
+                end
+                if bb then
+                    self.image = optimizeForEink(bb, strength)
+                    -- self.image takes priority over self.image_file in show(),
+                    -- but that path doesn't set alpha=true on the ImageWidget.
+                    -- We fix this up after show() returns (before paint).
+                    needs_alpha = true
+                end
+            end
+        end
+        local result = orig_show(self)
+        -- Restore alpha blending for transparent PNGs: the original show()
+        -- only sets alpha=true in the image_file code path, which we bypassed
+        -- by pre-loading into self.image.  The widget hasn't painted yet, so
+        -- setting the flag here takes effect in time.
+        if needs_alpha and self.screensaver_widget then
+            enableAlphaOnImageWidget(self.screensaver_widget)
+        end
+        return result
+    end
+
+    -- Inject menu entry into Sleep screen > Wallpaper.
+    -- The screensaver menu is loaded via dofile(); we wrap dofile to append
+    -- our entry to the Wallpaper sub-menu each time it is constructed.
+    local orig_dofile = dofile
+    dofile = function(filename, ...) -- luacheck: ignore
+        local result = orig_dofile(filename, ...)
+        if type(filename) == "string"
+           and filename:match("screensaver_menu%.lua$")
+           and type(result) == "table" then
+            local _ = require("gettext")
+            local T = require("ffi/util").template
+            -- result[1] is the "Wallpaper" section
+            local wallpaper = result[1]
+            if wallpaper and wallpaper.sub_item_table then
+                table.insert(wallpaper.sub_item_table, {
+                    text_func = function()
+                        local val = G_reader_settings:readSetting(
+                            "screensaver_eink_optimize", 0)
+                        return T(_("Optimize for color e-ink: %1"),
+                            val ~= 0 and (val .. " %") or _("off"))
+                    end,
+                    help_text = _(
+                        "Combined image processing for color e-ink sleep screens:\n"
+                        .. "• Gamma lift (brightens dark areas)\n"
+                        .. "• Saturation boost (richer colors)\n"
+                        .. "• S-curve contrast (adds depth)\n"
+                        .. "• Floyd-Steinberg dithering (smoother gradients)\n\n"
+                        .. "0 = off, 30 = subtle, 50 = recommended, 80 = aggressive."),
+                    enabled_func = function()
+                        local stype = G_reader_settings:readSetting("screensaver_type")
+                        return stype == "cover"
+                            or stype == "document_cover"
+                            or stype == "random_image"
+                    end,
+                    keep_menu_open = true,
+                    callback = function(touchmenu_instance)
+                        local SpinWidget = require("ui/widget/spinwidget")
+                        local UIManager  = require("ui/uimanager")
+                        UIManager:show(SpinWidget:new{
+                            value = G_reader_settings:readSetting(
+                                "screensaver_eink_optimize", 0),
+                            value_min = 0,
+                            value_max = 100,
+                            value_step = 5,
+                            default_value = 0,
+                            title_text = _("Optimize sleep screen for color e-ink"),
+                            ok_text = _("Set"),
+                            unit = "%",
+                            callback = function(spin)
+                                G_reader_settings:saveSetting(
+                                    "screensaver_eink_optimize", spin.value)
+                                if touchmenu_instance then
+                                    touchmenu_instance:updateItems()
+                                end
+                            end,
+                        })
+                    end,
+                })
+            end
+        end
+        return result
+    end
+
+    logger.info("screensaver eink-optimize patch applied")
+end
